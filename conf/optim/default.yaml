@@ -1,0 +1,4 @@
+use_lr_scheduler: True
+defaults:
+  - optimizer: Adam
+  - lr_scheduler: ReduceLROnPlateau

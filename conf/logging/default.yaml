@@ -1,0 +1,25 @@
+# log frequency
+val_check_interval: 1
+progress_bar_refresh_rate: 10
+
+wandb:
+  project: diffcsp
+  name: ${expname}
+  entity: null
+  log_model: True
+  mode: 'offline'
+  group: ${expname}
+
+wandb_watch:
+  log: 'all'
+  log_freq: 500
+
+swanlab:
+  project: diffcsp
+  experiment_name: ${expname}
+  mode: "offline"
+
+
+lr_monitor:
+  logging_interval: "step"
+  log_momentum: False
