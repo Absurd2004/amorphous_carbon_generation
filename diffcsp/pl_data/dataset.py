@@ -1,6 +1,7 @@
 import os
 import pickle
 from typing import Any
+from pathlib import Path
 
 import hydra
 import numpy as np
@@ -235,6 +236,9 @@ def main(cfg: omegaconf.DictConfig):
     print("Total Batch: ", batch)
     print(batch.anchor_index)
     return batch
+
+
+
 
 
 if __name__ == "__main__":

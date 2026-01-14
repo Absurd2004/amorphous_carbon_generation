@@ -1,313 +1,487 @@
-# CrystalFlow → 非晶材料生成改造计划
+# 2D 非晶碳 Flow Matching 生成模型 - 实施计划
 
-## 核心策略
+## 项目概述
 
-**保留 CrystalFlow 的 Flow Matching 框架** + **迁移 DM2 的非晶处理能力**
+**目标**: 基于 DM2 的 NequIP 等变神经网络架构，改造为 Flow Matching 生成模型，专为 2D 非晶碳条件生成。
 
-- Flow Matching (保留)
-- Conditional CFG (保留)
-- ODE求解器 (保留)
-- Hydra配置 (保留)
-- 非晶图构建 (迁移自DM2)
-- EGNN/E3NN (迁移自DM2)
-- 数据增强 (迁移自DM2)
-- 周期性工具 (迁移自DM2)
+**数据特点**:
+- LAMMPS 格式文件 (`.data`)
+- 50 个碳原子 / 样本
+- 2D 结构 (z = 0)
+- 固定盒子: 12×12×20 Å
+- 约 1000 个样本
+- 条件: 退火速率 = **100 K/ps** (暂时固定，后续可扩展)
+- 数据划分: **train:val:test = 8:1:1**
 
----
-
-## 阶段1: 数据层融合
-
-**作用**: 让CrystalFlow能够读取和处理非晶材料数据  
-**原因**: 晶体有周期性+对称性，非晶只有周期性边界。需要DM2的周期性工具处理无序结构
-
-### 📦 从DM2直接复制
-```bash
-DM2/src/graphite/data/mol.py → CrystalFlow/diffcsp/pl_data/mol_data.py
-DM2/src/graphite/nn/utils/mic.py → CrystalFlow/diffcsp/common/mic.py
-DM2/src/graphite/nn/utils/periodic_radius_graph.py → CrystalFlow/diffcsp/common/periodic_radius_graph.py
-DM2/src/graphite/nn/utils/edges.py → CrystalFlow/diffcsp/common/edges.py
-```
-
-### ✍️ 需要自己改写
-
-**1.1 创建非晶数据集类**
-- 文件: `diffcsp/pl_data/dataset.py`
-- 新增: `AmorphousDataset(CrystDataset)`
-- **作用**: 统一晶体/非晶数据格式，兼容现有训练流程  
-- **原因**: 晶体用分数坐标+极坐标晶格，非晶用分数坐标+正交盒，需要转换层
-- 功能:
-  - 使用 MolData 替代 Data (DM2的数据结构，支持周期性)
-  - 晶格简化为正交盒 (非晶不需要复杂晶格表示)
-  - 加载退火速率条件 (控制生成结构的无序度)
-
-**1.2 数据配置**
-- 文件: `conf/data/amorphous_carbon.yaml`
-- **作用**: 关闭晶体专用特性，启用非晶图构建  
-- **原因**: 非晶无空间群/对称性，用物理截断半径代替晶体学方法
-- 关键配置:
-  - `niggli: false`, `primitive: false` (关闭晶胞约化)
-  - `graph_method: radius_pbc` (固定截断半径，而非CrystalNN)
-  - `cutoff_radius: 5.0`, `max_neighbors: 32` (碳材料典型值)
-  - 条件: `annealing_rate` (对数尺度，跨10个数量级)
-
-**1.3 数据准备脚本**
-- 文件: `scripts/prepare_amorphous_data.py`
-- **作用**: 从MD模拟轨迹提取训练数据  
-- **原因**: 非晶结构来自分子动力学淬火，需要解析.xyz/.lammps格式
+**技术路线**: DM2 NequIP 架构 + Flow Matching 训练逻辑 + CrystalFlow 框架集成
 
 ---
 
-## 阶段2: 图构建层适配
+## ✅ 阶段一: 环境准备与数据处理 (已完成)
 
-**作用**: 构建原子间的连接关系（图的边）  
-**原因**: 非晶无晶体学规则，用固定截断半径+最小镜像约定保证物理正确性
+**已创建文件**:
+- `diffcsp/pl_data/amorphous_dataset.py` - 数据加载模块
+- `scripts/prepare_amorphous_carbon.py` - 数据预处理脚本
 
-### 📦 DM2组件保持不变
-- `periodic_radius_graph` 核心逻辑
-- `minimum_image_convention` (MIC)
-- 边特征计算 (`edge_vec`, `edge_length`)
-
-### ✍️ 需要改写
-
-**2.1 批处理图构建**
-- 文件: `diffcsp/common/data_utils.py`
-- 函数: `build_amorphous_batch_graph(batch, cutoff, max_neighbors)`
-- **作用**: 将DM2的单样本图构建扩展为批量处理  
-- **原因**: DM2只处理单个结构，训练需要批量并行加速
-- 功能:
-  - 遍历batch中每个图 (不同样本原子数不同)
-  - 调用DM2的 `periodic_radius_graph` (核心算法)
-  - 累加边索引偏移 (batch拼接后索引需要累加)
-
-**2.2 DataModule对接**
-- 文件: `diffcsp/pl_data/datamodule.py`
-- **作用**: 根据数据类型自动选择图构建方法  
-- **原因**: 晶体用CrystalNN，非晶用radius_pbc，需要兼容两种模式
-- 修改 `collate_fn`: 检测数据类型分发图构建方法
+**已验证**: 1000个样本加载成功，图结构正确，2D约束有效
 
 ---
 
-## 阶段3: GNN架构混合
+## ✅ 阶段二: Flow Matching 网络改造 (已完成)
 
-**作用**: 学习原子间相互作用，预测速度场  
-**原因**: CrystalFlow的GemNet-dT依赖晶格对称性，非晶需要等变GNN捕捉无序结构
+**已创建文件**:
+- `diffcsp/pl_modules/nequip_flow.py` - NequIP_FlowMatching 网络
+- `diffcsp/pl_modules/flow_transforms.py` - Flow Matching 变换
+- `diffcsp/pl_modules/amorphous_flow_module.py` - Lightning 训练模块
 
-### 📦 迁移DM2的GNN模型
+**核心组件**:
+1. **NequIP_FlowMatching**: E3等变网络，支持时间嵌入和条件嵌入
+2. **FlowMatchingTransform**: 实现 x_t = (1-t)x_0 + t*x_1 插值
+3. **AmorphousFlowModule**: 完整的 Lightning 模块，包含训练和采样
 
-**选项A: EGNN (推荐)**
-```bash
-DM2/src/graphite/nn/models/egnn.py → CrystalFlow/diffcsp/pl_modules/egnn_model.py
-DM2/src/graphite/nn/conv/egnn.py → CrystalFlow/diffcsp/pl_modules/conv/egnn_conv.py
-```
-- **作用**: 平移+旋转等变的消息传递网络  
-- **原因**: 非晶无固定取向，等变性保证预测与坐标系无关，简单高效
-
-**选项B: E3NN-NequIP (高精度)**
-```bash
-DM2/src/graphite/nn/models/e3nn_nequip_improved.py → CrystalFlow/diffcsp/pl_modules/e3nn_model.py
-```
-
-**径向基函数**
-```bash
-DM2/src/graphite/nn/basis.py → CrystalFlow/diffcsp/pl_modules/basis.py
-```
-- **作用**: 将原子间距离编码为高维特征  
-- **原因**: 替代晶体的Miller指数，用Bessel函数捕捉距离依赖的相互作用
-
-### ✍️ 需要改写
-
-**3.1 非晶解码器**
-- 文件: `diffcsp/pl_modules/amorphous_decoder.py`
-- 类: `AmorphousDecoder(nn.Module)`
-- **作用**: 整合DM2的GNN和CrystalFlow的Flow架构  
-- **原因**: DM2预测噪声(Diffusion)，我们需要改为预测速度场(Flow)
-- 架构:
-  - backbone: EGNN/E3NN (从DM2迁移，负责消息传递)
-  - time_embedding: 复用CrystalFlow的 `SinusoidalTimeEmbedding` (Flow时间步)
-  - cond_embedding: 新增退火速率嵌入 (条件控制)
-  - output_head: 预测速度场 (3D向量，而非DM2的noise)
-
-**3.2 模型配置**
-- 文件: `conf/model/decoder/egnn_amorphous.yaml`
-- 参数: `hidden_dim: 256`, `num_layers: 8`
+**已验证**:
+- 前向传播成功 ✓
+- 损失计算正确 ✓
+- 反向传播正常 ✓
+- 采样生成有效 ✓
 
 ---
 
-## 阶段4: Flow核心改造
+## 阶段一: 环境准备与数据处理 (预计 2-3 天)
 
-**作用**: 实现Flow Matching训练和采样逻辑  
-**原因**: DM2用扩散模型(DDPM)，我们保持Flow Matching框架，速度更快且确定性更强
+### 1.1 复用 DM2 数据加载代码
 
-### ✍️ 完全自己写 (DM2用Diffusion，无法迁移)
+**文件来源**: `DM2/demo/demo_training/denoiser_train_unconditional.py`
 
-**4.1 非晶Flow模型**
-- 文件: `diffcsp/pl_modules/amorphous_flow.py`
-- 类: `AmorphousFlow(BaseModule)`
-- 继承自: `diffcsp/pl_modules/flow.py` 的 `CSPFlow`
-- **作用**: Flow Matching的核心训练和采样引擎  
-- **原因**: 保持CrystalFlow的优势(快速ODE采样)，去除晶体专用组件
-- 关键修改:
-  - 移除 `lattice_polar` 模块 (非晶不需要学习晶格)
-  - 添加 `orthogonal_lattice` (固定正交盒子，减少自由度)
-  - 使用 `AmorphousDecoder` 替代 `CSPNet` (EGNN替代GemNet)
-  - `forward`: Flow Matching训练逻辑
-    - 线性插值: `pos_t = pos_0 + t*(pos_1 - pos_0)` (构建从噪声到真实的路径)
-    - 动态构建图 (每次前向传播重新计算邻居)
-    - 预测速度场 (学习从噪声→结构的流动)
-    - 损失: `MSE(pred_velocity, target_velocity)` (速度匹配)
-  - `sample`: ODE积分推理
-    - 初始化随机坐标 (t=1, 盒子内均匀分布)
-    - 每步重建图 (坐标变化导致邻居变化)
-    - 应用PBC (保持原子在盒子内)
-
-**4.2 晶格简化**
-- 文件: `diffcsp/pl_modules/lattice_utils.py`
-- 类: `OrthogonalLattice`
-- **作用**: 简化晶格表示，降低模型复杂度  
-- **原因**: 非晶MD通常用正交盒子，无需学习6自由度晶格参数
-- 功能:
-  - `from_lengths(Lx, Ly, Lz)` → 正交盒 (对角矩阵)
-  - `sample_random()` → 随机初始化 (Flow的t=1状态)
-  - `apply_pbc(pos, cell)` → 周期性边界 (坐标映射到[0, 1))
-
-**4.3 模型配置**
-- 文件: `conf/model/amorphous_flow.yaml`
-- 关键配置:
-  - `lattice_type: orthogonal`, `lattice_fixed: true`
-  - `cutoff_radius: 5.0`, `rebuild_graph_every_step: true`
-  - `cost_position: 10.0`, `cost_lattice: 0.0`
-
----
-
-## 阶段5: 条件生成 + 训练优化
-
-**作用**: 通过退火速率控制生成结构，增强训练稳定性  
-**原因**: 不同退火速率产生不同无序度；数据增强防止过拟合
-
-### 📦 迁移DM2数据增强
-```bash
-DM2/src/graphite/transforms/rattle_particles.py → CrystalFlow/diffcsp/pl_data/transforms/rattle.py
-DM2/src/graphite/transforms/downselect_edges.py → CrystalFlow/diffcsp/pl_data/transforms/edge_dropout.py
-```
-
-### ✍️ 需要改写
-
-**5.1 条件嵌入**
-- 文件: `diffcsp/pl_modules/conditioning.py`
-- 类: `AnnealingRateEmbedding(MultiEmbedding)`
-- **作用**: 将退火速率编码为可学习的向量  
-
-- 功能:
-  - 对数归一化: `log10(rate)` → [0, 1] (线性化大范围)
-  - MLP嵌入: [1] → [64] (学习条件表示)
-  - 训练: CFG dropout (10%概率置零，学习有/无条件)
-  - 推理: 混合有/无条件预测 (增强条件控制力度)
-
-**5.2 数据增强集成**
-- 文件: `diffcsp/pl_data/datamodule.py`
-- **作用**: 训练时引入随机扰动，提高泛化能力  
-- **原因**: 非晶本身就是无序的，增强数据多样性避免记忆训练集
-- 修改 `train_dataloader`:
-  - 添加 `RattleParticles(stdev=0.05)` (随机扰动坐标±0.05Å)
-  - 添加 `DownselectEdges(keep_ratio=0.9)` (随机删除10%的边)
-
-**5.3 训练脚本**
-- 文件: `scripts/train_amorphous.sh`
-- 核心参数:
-  - `data=amorphous_carbon`
-  - `model=amorphous_flow`
-  - `model.cutoff_radius=5.0`
-  - `+model.guide_threshold=-1`
-  - `+train.pl_trainer.gradient_clip_val=1.0`
-
----
-
-## 文件清单
-
-### 📦 从DM2直接复制 (7个文件)
-| DM2源文件 | CrystalFlow目标 | 修改 |
-|----------|----------------|------|
-| `data/mol.py` | `pl_data/mol_data.py` | ❌ 无 |
-| `nn/utils/mic.py` | `common/mic.py` | ❌ 无 |
-| `nn/utils/periodic_radius_graph.py` | `common/periodic_radius_graph.py` | ❌ 无 |
-| `nn/utils/edges.py` | `common/edges.py` | ❌ 无 |
-| `nn/models/egnn.py` | `pl_modules/egnn_model.py` | ✅ 输出层 |
-| `nn/basis.py` | `pl_modules/basis.py` | ❌ 无 |
-| `transforms/rattle_particles.py` | `pl_data/transforms/rattle.py` | ✅ Hydra集成 |
-
-### ✍️ 需要自己写 (5个核心文件)
-| 文件 | 内容 | 难度 |
-|------|------|------|
-| `pl_data/dataset.py` | `AmorphousDataset` | ⭐⭐ |
-| `common/data_utils.py` | 批量图构建 | ⭐⭐⭐ |
-| `pl_modules/amorphous_decoder.py` | Flow解码器 | ⭐⭐⭐⭐ |
-| `pl_modules/amorphous_flow.py` | Flow主模型 | ⭐⭐⭐⭐⭐ |
-| `pl_modules/lattice_utils.py` | 正交盒工具 | ⭐ |
-
-### 🔧 需要修改的现有文件
-- `pl_data/datamodule.py`: 添加非晶数据支持
-- `pl_modules/conditioning.py`: 新增退火速率嵌入
-- `run.py`: 检测模型类型分发
-
----
-
-## 关键差异处理
-
-| 项目 | CrystalFlow | DM2 | 统一方案 |
-|------|------------|-----|---------|
-| **坐标** | `frac_coords` (分数) | `pos` (笛卡尔) | Dataset转换时统一为笛卡尔 |
-| **晶格** | `lattice_polar` (6D) | `cell` (3×3) | 简化为正交盒 `diag([Lx,Ly,Lz])` |
-| **图方法** | `CrystalNN` (动态) | `radius` (固定) | 配置项 `graph_method` |
-| **GNN** | GemNet-dT (晶体) | EGNN (等变) | 新增 `AmorphousDecoder` |
-
----
-
-## 验证检查点
-
-### Milestone 1: 数据通路
+**需要复用的函数**:
 ```python
-dataset = AmorphousDataset(...)
-batch = dataset[0]
-assert isinstance(batch, MolData)  # ✅ DM2结构
-assert batch.pos.shape[-1] == 3    # ✅ 笛卡尔坐标
+# 1. ASE 图构建函数
+def ase_graph(data, cutoff):
+    i, j, D = primitive_neighbor_list('ijD', cutoff=cutoff, pbc=data.pbc, 
+                                      cell=data.cell, positions=data.pos.numpy(), 
+                                      numbers=data.numbers)
+    data.edge_index = torch.tensor(np.stack((i, j)), dtype=torch.long)
+    data.edge_attr = torch.tensor(D, dtype=torch.float)
+    return data
+
+# 2. 数据集类 (需修改以支持条件)
+class PeriodicStructureDataset(Dataset):
+    ...
 ```
 
-### Milestone 2: 图构建
-```python
-edge_index, edge_attr = build_amorphous_batch_graph(batch, cutoff=5.0)
-assert 'edge_vec' in edge_attr  # ✅ DM2特征
+**创建新文件**: `CrystalFlow/diffcsp/pl_data/amorphous_dataset.py`
+
+**任务清单**:
+- [ ] 从 DM2 复制 `ase_graph` 函数
+- [ ] 创建 `AmorphousCarbonDataset` 类，支持:
+  - [x] LAMMPS 文件读取
+  - [ ] 退火速率条件解析 (从文件名提取)
+  - [ ] 笛卡尔坐标归一化
+  - [ ] 数据复制增强
+- [ ] 创建 `AmorphousDataModule` 类
+
+**测试点**:
+```bash
+# 测试数据加载
+ **主线修订**: 基于 DM2 的 NequIP 等变神经网络架构，改造为 Flow Matching 生成模型，专为 2D 非晶碳条件生成。
+from diffcsp.pl_data.amorphous_dataset import AmorphousCarbonDataset
+ds = AmorphousCarbonDataset('/path/to/data', cutoff=5.0)
+
+ **技术路线修订**: DM2 NequIP 架构 + Flow Matching 训练逻辑 + DM2 数据处理 + 条件嵌入
+- 读取所有 LAMMPS 文件
+- 划分 train/val/test (80/10/10)
+- 保存为 PyTorch 缓存文件 (`.pt`)
+
+```
+# 退火速率: 统一设为 100 K/ps
+# 后续扩展: 可改为 rate_100_sample_001.data 格式
+```
+- 训练集: 800 个样本 (1-800)
+- 验证集: 100 个样本 (801-900)
+- 测试集: 100 个样本 (901-1000)
 ```
 
-### Milestone 3: 模型训练
+## 阶段二: 模型架构简化 (预计 3-5 天)
+### 2.1 创建 AmorphousFlow 模型
+
+**创建文件**: `CrystalFlow/diffcsp/pl_modules/amorphous_flow.py`
+**主要简化**:
+| 原 CSPFlow 功能 | AmorphousFlow 处理 |
+|----------------|-------------------|
+| 晶格流 (lattice flow) | ❌ 移除 |
+| 坐标流 | ✅ 保留并适配 2D |
+**核心修改**:
+
 ```python
+        self.keep_lattice = True  # 始终固定盒子
+        
+        # 2D 特殊处理
+        self.is_2d = True  # z 坐标始终为 0
+        
+    def forward(self, batch):
+        # 只进行坐标流
+        cart_coords = batch.pos  # 笛卡尔坐标
+        box_size = batch.cell.diagonal()  # 盒子尺寸
+        
+        # 归一化到 [0, 1]
+        norm_coords = cart_coords / box_size
+        
+        # 采样初始坐标 (均匀分布)
+        x0 = torch.rand_like(norm_coords)
+        if self.is_2d:
+            x0[:, 2] = 0  # z = 0
+        
+        # Flow matching
+        tar_x = (norm_coords - x0 - 0.5) % 1 - 0.5  # 最小镜像
+        input_coords = x0 + times * tar_x
+        # 预测
+        pred_x = self.decoder(...)
+        
+        # 损失 (只有坐标)
+        loss = F.mse_loss(pred_x, tar_x)
+        return {'loss': loss}
+```
+
+**任务清单**:
+- [ ] 创建 `AmorphousFlow` 类框架
+- [ ] 实现简化的 `forward()` 方法
+- [ ] 实现 `sample()` 采样方法
+- [ ] 添加 2D 坐标约束
+**测试点**:
+```python
+# 测试前向传播
 model = AmorphousFlow(...)
-loss = model.training_step(batch)
-assert loss < 10.0 and not torch.isnan(loss)  # ✅ 收敛
+batch = next(iter(dataloader))
+loss = model(batch)
+print(f'Loss: {loss["loss"].item():.4f}')
 ```
 
-### Milestone 4: 生成质量
+
+**修改文件**: `CrystalFlow/diffcsp/pl_modules/cspnet.py`
+
 ```python
-structures = model.sample(num_samples=10, annealing_rate=1e12)
-rdf_error = compute_rdf_error(structures, reference)
-assert rdf_error < 0.05  # ✅ RDF误差<5%
+    if self.edge_style == 'knn_pbc':
+        # 使用 DM2 的 primitive_neighbor_list
+        ...
+```
+
+2. **移除晶格特征**:
+```python
+# 禁用
+rec_emb = None      # 倒易晶格嵌入
+periodic_norm = False
+use_angles = False
+ip = False          # 晶格内积
+```
+
+3. **输出调整**:
+```python
+# 只输出坐标变化
+def forward(self, ...):
+    ...
+    coord_out = self.coord_out(node_features)
+    # 移除 lattice_out
+    return coord_out
+```
+
+**任务清单**:
+- [ ] 添加 `edge_style='knn_pbc'` 模式 (使用 ASE)
+- [ ] 创建简化配置选项
+- [ ] 测试非周期图构建正确性
+
+---
+
+## 阶段三: 条件嵌入集成 (预计 2-3 天)
+
+### 3.1 从 DM2 迁移条件嵌入
+
+**源文件**: `DM2/src/graphite/nn/models/e3nn_nequip.py`
+
+**复制到**: `CrystalFlow/diffcsp/pl_modules/conditioning.py` (已有部分代码)
+
+**需要迁移**:
+
+```python
+# GaussianBasisEmbedding - 高斯基函数嵌入
+class GaussianBasisEmbedding(nn.Module):
+    def __init__(self, num_basis=12, embedding_dim=32, min_value=-1, max_value=3):
+        # min_value=-1, max_value=3 适合 log10(cooling_rate)
+        ...
+    
+    def forward(self, x):
+        # x: [batch_size] - log10 cooling rate
+        return embedding  # [batch_size, embedding_dim]
+```
+
+### 3.2 条件注入方式
+
+**方案A**: 加到节点特征 (类似 DM2)
+```python
+# 在每层后添加条件
+for layer in self.layers:
+    h = layer(h, ...)
+    h = h + condition_embed  # 广播到所有节点
+```
+
+**方案B**: 使用 CrystalFlow 已有的 `guide_threshold` 机制
+```python
+# flow.py 已有条件嵌入接口
+cemb = self.cond_emb(**{key: batch.get(key) for key in self.cond_emb.cond_keys})
+```
+
+**推荐方案A** - 更简单直接
+
+**任务清单**:
+- [ ] 迁移 `GaussianBasisEmbedding` 类
+- [ ] 在 decoder 中添加条件注入点
+- [ ] 实现条件采样 (classifier-free guidance 可选)
+
+---
+
+## 阶段四: 配置与训练脚本 (预计 2-3 天)
+
+### 4.1 创建配置文件
+
+**创建文件**: `CrystalFlow/conf/data/amorphous_carbon.yaml`
+```yaml
+root_path: ${oc.env:PROJECT_ROOT}/data/amorphous_carbon
+prop: cooling_rate
+num_targets: 1
+properties:
+  - cooling_rate
+conditions:
+  - cooling_rate
+
+# 2D 非晶碳特有
+num_atoms: 50
+box_size: [12.0, 12.0, 20.0]
+is_2d: true
+cutoff: 5.0
+
+# 数据增强
+duplicate: 128
+
+datamodule:
+  _target_: diffcsp.pl_data.amorphous_dataset.AmorphousDataModule
+  datasets:
+    train:
+      _target_: diffcsp.pl_data.amorphous_dataset.AmorphousCarbonDataset
+      ...
+```
+
+**创建文件**: `CrystalFlow/conf/model/amorphous_flow.yaml`
+```yaml
+_target_: diffcsp.pl_modules.amorphous_flow.AmorphousFlow
+
+time_dim: 256
+latent_dim: 0
+cost_coord: 1.0
+cost_lattice: 0.0  # 禁用
+
+is_2d: true
+use_pbc: true
+
+decoder:
+  _target_: diffcsp.pl_modules.amorphous_cspnet.AmorphousCSPNet
+  hidden_dim: 128
+  num_layers: 4
+  edge_style: 'knn_pbc'
+  cutoff: 5.0
+  max_neighbors: 20
+  dis_emb: 'sin'
+  rec_emb: null  # 禁用
+  periodic_norm: false
+  
+conditions:
+  embedding_dim: 32
+  num_basis: 12
+```
+
+### 4.2 训练脚本
+
+**运行命令**:
+```bash
+CUDA_VISIBLE_DEVICES=0 python diffcsp/run.py \
+  data=amorphous_carbon \
+  model=amorphous_flow \
+  data.train_max_epochs=3000 \
+  optim.optimizer.lr=1e-3 \
+  expname=amorphous-carbon-2d
+```
+
+**任务清单**:
+- [ ] 创建数据配置文件
+- [ ] 创建模型配置文件
+- [ ] 验证配置加载正确
+- [ ] 小规模训练测试 (fast_dev_run)
+
+---
+
+## 阶段五: 生成与评估 (预计 3-5 天)
+
+### 5.1 创建生成脚本
+
+**创建文件**: `CrystalFlow/scripts/generate_amorphous.py`
+
+**参考**: `DM2/demo/demo_generating/denoise_generate_unconditional.py`
+
+**核心函数**:
+```python
+@torch.no_grad()
+def generate_amorphous(model, num_atoms, box_size, steps=100, condition=None):
+    """
+    从随机噪声生成 2D 非晶碳结构
+    """
+    # 初始化随机坐标
+    x0 = torch.rand(num_atoms, 3) * box_size
+    x0[:, 2] = 0  # 2D
+    
+    # ODE 求解 (使用 CrystalFlow 的 solver)
+    for t in linspace(0, 1, steps):
+        v = model.decoder(x0, t, condition)
+        x0 = x0 + v * dt
+        x0 = x0 % box_size  # PBC
+    
+    return x0
+```
+
+### 5.2 评估指标 (参考 DM2)
+
+**DM2 使用的评估方法**:
+
+1. **径向分布函数 (RDF)** - 最重要的结构指标
+   - 计算原子对距离分布
+   - 对比生成结构与真实结构的 RDF 曲线
+   - 使用 Jensen-Shannon 散度量化差异
+
+2. **键角分布 (Bond Angle Distribution)**
+   - 来源: `DM2/src/graphite/nn/utils/angles.py`
+   - 计算相邻原子间的键角 cos/sin 值
+   - 对于碳材料，典型键角约 120° (sp2) 或 109.5° (sp3)
+
+3. **二面角分布 (Dihedral Angles)** - 可选
+   - 四原子链的扭转角
+   - 反映结构的三维特征 (2D 碳可能不适用)
+
+4. **Chamfer 距离**
+   - 来源: `DM2/src/graphite/nn/loss.py`
+   - 点云之间的最近邻距离
+   - 可用于评估生成结构与参考结构的相似度
+
+5. **配位数分布**
+   - 每个原子的邻居数量统计
+   - 对于 2D 碳，典型配位数为 2-3
+
+**复用 DM2 代码**:
+```python
+# 从 DM2 迁移
+from graphite.nn.loss import jensen_shannon, chamfer_distance
+from graphite.nn.utils.angles import bond_angles
+```
+
+**创建文件**: `CrystalFlow/scripts/evaluate_amorphous.py`
+
+**任务清单**:
+- [ ] 实现生成脚本
+- [ ] 实现 RDF 计算
+- [ ] 实现配位数分析
+- [ ] 可视化工具
+
+---
+
+## 阶段六: 优化与扩展 (可选)
+
+### 6.1 性能优化
+- [ ] 多 GPU 训练 (DDP)
+- [ ] 混合精度训练
+- [ ] 数据加载优化
+
+### 6.2 模型改进
+- [ ] 尝试 E3NN (从 DM2 迁移)
+- [ ] Classifier-free guidance
+- [ ] 不同采样方法 (Euler, RK4, DPM-Solver)
+
+### 6.3 扩展到 3D
+- [ ] 移除 z=0 约束
+- [ ] 调整盒子尺寸
+- [ ] 3D 非晶碳数据集
+
+---
+
+## 文件结构规划
+
+```
+CrystalFlow/
+├── conf/
+│   ├── data/
+│   │   └── amorphous_carbon.yaml       # [新建]
+│   └── model/
+│       └── amorphous_flow.yaml         # [新建]
+├── data/
+│   └── amorphous_carbon/
+│       ├── data/                       # [已有] LAMMPS 文件
+│       ├── train.pt                    # [待生成] 训练集缓存
+│       ├── val.pt                      # [待生成] 验证集缓存
+│       └── test.pt                     # [待生成] 测试集缓存
+├── diffcsp/
+│   ├── pl_data/
+│   │   └── amorphous_dataset.py        # [新建] 数据集类
+│   └── pl_modules/
+│       ├── amorphous_flow.py           # [新建] 流模型
+│       └── amorphous_cspnet.py         # [新建] Decoder (可选，或修改原 cspnet.py)
+└── scripts/
+    ├── prepare_amorphous_carbon.py     # [新建] 数据预处理
+    ├── generate_amorphous.py           # [新建] 生成脚本
+    └── evaluate_amorphous.py           # [新建] 评估脚本
 ```
 
 ---
 
-## 优先级
+## 里程碑与时间表
 
-1. **P0** (必须): 数据层 + 图构建 + Flow核心
-2. **P1** (重要): EGNN迁移 + 条件生成  
-3. **P2** (优化): 数据增强 + 评估指标
+| 阶段 | 内容 | 预计时间 | 测试验证 |
+|------|------|----------|----------|
+| 1 | 数据加载 | 2-3 天 | 数据集可迭代，图结构正确 |
+| 2 | 模型架构 | 3-5 天 | 前向传播无报错，loss 下降 |
+| 3 | 条件嵌入 | 2-3 天 | 条件生成结果有差异 |
+| 4 | 配置与训练 | 2-3 天 | 完整训练流程跑通 |
+| 5 | 生成与评估 | 3-5 天 | RDF 与真实数据接近 |
+| 6 | 优化扩展 | 持续 | 性能/效果提升 |
 
-## 技术选型
+**总计**: 约 2-3 周完成基础版本
 
-- **GNN**: EGNN (简单稳定)
-- **晶格**: 固定正交盒 (减少自由度)
-- **采样**: Euler ODE (已验证)
+---
 
-## 调试策略
+## 风险与注意事项
 
-1. 先用小数据集(100样本)验证流程
-2. 固定晶格，只学习坐标
-3. 无条件训练通过后再加CFG
+1. **2D 结构特殊性**: 确保 z 坐标始终为 0
+2. **PBC 处理**: 使用 ASE 的 `primitive_neighbor_list` 确保正确
+3. **坐标归一化**: 注意盒子尺寸不一致时的处理
+4. **条件标注**: 需要用户提供退火速率的标注方式
+5. **小数据量**: 1000 个样本可能需要更多数据增强
+
+---
+
+## 待用户确认
+
+~~1. **退火速率标注**: 请确认如何在文件名或元数据中体现退火速率~~
+   - ✅ 已确认：暂时统一设为 100 K/ps
+
+~~2. **数据划分**: 是否有特定的 train/val/test 划分要求？~~
+   - ✅ 已确认：8:1:1 比例
+
+~~3. **评估指标**: 除 RDF 外，还需要哪些评估指标？~~
+   - ✅ 已确认：参考 DM2 (RDF, 键角分布, Chamfer 距离, 配位数)
+
+4. **硬件资源**: 可用 GPU 型号和数量？
+
+5. **时间约束**: 是否有截止日期？
+
+---
+
+## 下一步行动
+
+1. ~~等待用户确认退火速率标注方式~~ ✅
+2. 开始阶段一：数据加载模块开发
+3. 创建 `amorphous_dataset.py` 文件
+4. 测试数据加载和图构建
