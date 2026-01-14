@@ -2,17 +2,22 @@
 Amorphous Flow Module - PyTorch Lightning Module for Flow Matching.
 
 This module integrates:
-1. NequIP_FlowMatching network (E3-equivariant)
+1. Multiple model backends (NequIP, EGNN, SchNet) with dynamic switching
 2. Flow Matching training logic
 3. ODE sampling for generation
 4. Conditional generation (cooling rate)
 
 Compatible with CrystalFlow's training infrastructure.
+
+Supported Models:
+- nequip (default): E(3) equivariant, highest accuracy, slower
+- egnn: E(n) equivariant, balanced speed/accuracy
+- schnet: Fast, not equivariant, good for smooth potentials
 """
 
 import math
 import logging
-from typing import Any, Dict, Optional, List, Tuple
+from typing import Any, Dict, Optional, List, Tuple, Union
 
 import numpy as np
 import torch
@@ -25,10 +30,12 @@ from tqdm import tqdm
 import hydra
 from omegaconf import DictConfig
 
-from diffcsp.pl_modules.nequip_flow import (
-    NequIP_FlowMatching, 
-    create_nequip_flow_model,
-    InitialEmbedding,
+from diffcsp.pl_modules.model_factory import (
+    create_model,
+    list_available_models,
+    get_model_info,
+    ModelType,
+    DEFAULT_CONFIGS,
 )
 from diffcsp.pl_modules.flow_transforms import (
     FlowMatchingTransform,
@@ -49,6 +56,7 @@ class AmorphousFlowModule(pl.LightningModule):
     1. Training: Flow matching with velocity field prediction
     2. Sampling: ODE integration from noise to data
     3. Conditional generation: Support for cooling rate conditioning
+    4. Dynamic model switching: NequIP, EGNN, or SchNet backend
     
     Flow Matching Formulation:
     - x_t = (1-t) * x_0 + t * x_1  (linear interpolation)
@@ -56,32 +64,38 @@ class AmorphousFlowModule(pl.LightningModule):
     - Loss = MSE(v_pred, v_target)
     
     Args:
-        model_config: Configuration for NequIP_FlowMatching model
-        optimizer_config: Configuration for optimizer
-        lr_scheduler_config: Configuration for learning rate scheduler
+        model_type: Model backend ('nequip', 'egnn', 'schnet'), default='nequip'
+        model_config: Configuration dict for the model
         box_size: Simulation box size [Lx, Ly, Lz]
         cutoff: Cutoff radius for graph construction
         is_2d: Whether structure is 2D (z=0)
         prior: Prior distribution ('uniform' or 'gaussian')
         use_condition: Whether to use conditioning (cooling rate)
+        learning_rate: Learning rate
         ema_decay: Exponential moving average decay (0 to disable)
+    
+    Example:
+        # Use NequIP (default, highest accuracy)
+        module = AmorphousFlowModule(model_type='nequip')
+        
+        # Use EGNN (faster, still equivariant)
+        module = AmorphousFlowModule(model_type='egnn', model_config={'hidden_dim': 256})
+        
+        # Use SchNet (fastest)
+        module = AmorphousFlowModule(model_type='schnet')
     """
     
     def __init__(
         self,
-        # Model configuration
-        num_species: int = 1,
+        # Model selection
+        model_type: str = 'nequip',  # 'nequip', 'egnn', 'schnet'
+        model_config: Optional[Dict] = None,
+        # Common model configuration (used if model_config is None)
         cutoff: float = 5.0,
-        node_dim: int = 8,
-        edge_num_basis: int = 16,
-        irreps_hidden: str = '64x0e + 32x1e + 32x2e',
-        num_convs: int = 3,
-        radial_neurons: List[int] = [16, 64],
-        num_neighbors: int = 12,
         time_embed_dim: int = 32,
         cond_embed_dim: int = 32,
-        cond_min_value: float = -1.0,
-        cond_max_value: float = 3.0,
+        cond_min_value: float = 1.0,
+        cond_max_value: float = 4.0,
         # Training configuration
         box_size: List[float] = [12.0, 12.0, 20.0],
         is_2d: bool = True,
@@ -100,6 +114,7 @@ class AmorphousFlowModule(pl.LightningModule):
         self.save_hyperparameters()
         
         # Store configuration
+        self.model_type = model_type
         self.box_size = torch.tensor(box_size)
         self.cutoff = cutoff
         self.is_2d = is_2d
@@ -110,21 +125,28 @@ class AmorphousFlowModule(pl.LightningModule):
         self.lr_scheduler = lr_scheduler
         self.lr_scheduler_params = lr_scheduler_params or {}
         
-        # Create model
-        self.model = create_nequip_flow_model(
-            num_species=num_species,
-            cutoff=cutoff,
-            node_dim=node_dim,
-            edge_num_basis=edge_num_basis,
-            irreps_hidden=irreps_hidden,
-            num_convs=num_convs,
-            radial_neurons=radial_neurons,
-            num_neighbors=num_neighbors,
-            time_embed_dim=time_embed_dim,
-            cond_embed_dim=cond_embed_dim,
-            cond_min_value=cond_min_value,
-            cond_max_value=cond_max_value,
-        )
+        # Build model config
+        if model_config is None:
+            model_config = {}
+        
+        # Add common parameters
+        model_config.setdefault('cutoff', cutoff)
+        model_config.setdefault('time_embed_dim', time_embed_dim)
+        model_config.setdefault('cond_embed_dim', cond_embed_dim)
+        model_config.setdefault('cond_min_value', cond_min_value)
+        model_config.setdefault('cond_max_value', cond_max_value)
+        
+        # Create model using factory
+        logger.info(f"Creating model: {model_type}")
+        logger.info(f"Model config: {model_config}")
+        
+        self.model = create_model(model_type, **model_config)
+        
+        # Log model info
+        model_info = get_model_info(model_type)
+        logger.info(f"Model: {model_info['name']} - {model_info['description']}")
+        n_params = sum(p.numel() for p in self.model.parameters())
+        logger.info(f"Parameters: {n_params:,}")
         
         # Flow matching transform (applied during training)
         self.flow_transform = FlowMatchingTransformBatch(
