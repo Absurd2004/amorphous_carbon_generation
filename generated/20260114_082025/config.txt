@@ -1,0 +1,11 @@
+Generation Config
+==================================================
+Checkpoint: hydra/singlerun/e2e-test/epoch=049-val_loss=7.3517.ckpt
+Cooling rates: [100.0]
+Samples per rate: 10
+Atoms per sample: 50
+ODE steps: 50
+ODE method: euler
+Format: lammps
+Device: cuda
+Seed: 42

@@ -171,41 +171,84 @@ python diffcsp/train_amorphous.py train.pl_trainer.fast_dev_run=true
 
 ---
 
-## 📋 阶段四: 生成与评估 (待开始)
+## ✅ 阶段四: 生成与评估 (已完成)
 
 ### 4.1 生成脚本
 
-**创建文件**: `scripts/generate_amorphous.py`
+**已创建文件**: `scripts/generate_amorphous.py`
 
 功能:
 - 条件生成 (指定冷却速率)
 - 批量生成
-- 保存为 LAMMPS 格式
+- 保存为 LAMMPS/XYZ 格式
+- ODE 积分方法: Euler / RK4
 
-```python
-# 使用示例
+```bash
+# 基础使用
 python scripts/generate_amorphous.py \
     --checkpoint path/to/model.ckpt \
     --cooling_rate 100 \
     --num_samples 100 \
     --output_dir generated/
+
+# 生成所有冷却速率
+python scripts/generate_amorphous.py \
+    --checkpoint path/to/model.ckpt \
+    --all_rates \
+    --num_samples 20
+
+# 使用 RK4 积分
+python scripts/generate_amorphous.py \
+    --checkpoint path/to/model.ckpt \
+    --method rk4 \
+    --steps 100
 ```
 
 ### 4.2 评估指标
 
-| 指标 | 描述 |
-|------|------|
-| RDF | 径向分布函数 |
-| 键角分布 | C-C-C 键角 |
-| 配位数 | 平均近邻数 |
-| 环统计 | 3-8 元环分布 |
-| 能量 | LAMMPS/ASE 计算 |
+**已创建文件**: `scripts/evaluate_amorphous.py`
 
-### 4.3 可视化
+| 指标 | 描述 | 已实现 |
+|------|------|--------|
+| RDF | 径向分布函数 | ✅ |
+| 键角分布 | C-C-C 键角 | ✅ |
+| 配位数 | 平均近邻数/sp杂化分布 | ✅ |
+| 环统计 | 3-8 元环分布 | ✅ |
 
-- 结构可视化 (ASE/OVITO)
-- 训练曲线
-- 条件插值
+```bash
+# 评估生成样本并与真实数据对比
+python scripts/evaluate_amorphous.py \
+    --generated generated/samples/ \
+    --reference data/amorphous_carbon/data/ \
+    --output evaluation_results/
+```
+
+**输出文件**:
+- `generated_metrics.json` - 生成样本指标
+- `reference_metrics.json` - 真实样本指标
+- `comparison.json` - 对比结果 (RDF MSE, MAE等)
+- `comparison_plot.png` - 可视化对比图
+
+### 4.3 可视化工具
+
+**已创建文件**: `scripts/visualize_amorphous.py`
+
+功能:
+- 单结构 2D 可视化
+- 多结构网格可视化
+- 生成 vs 真实对比
+- 按配位数着色 (sp=蓝, sp²=绿, sp³=红)
+
+```bash
+# 单结构可视化
+python scripts/visualize_amorphous.py --input sample.data --output plot.png
+
+# 多结构网格
+python scripts/visualize_amorphous.py --input generated/ --output grid.png
+
+# 对比可视化
+python scripts/visualize_amorphous.py --generated gen.data --reference ref.data --output compare.png
+```
 
 ---
 
@@ -237,9 +280,13 @@ CrystalFlow/
 │       ├── flow_transforms.py       # ✅ Flow Matching 变换
 │       ├── amorphous_flow_module.py # ✅ Lightning 模块
 │       └── model_factory.py         # ✅ 模型工厂
-└── scripts/
-    ├── prepare_amorphous_carbon.py  # 数据预处理
-    └── generate_amorphous.py        # 生成脚本 (待创建)
+├── scripts/
+│   ├── prepare_amorphous_carbon.py  # ✅ 数据预处理
+│   ├── generate_amorphous.py        # ✅ 生成脚本
+│   ├── evaluate_amorphous.py        # ✅ 评估脚本
+│   └── visualize_amorphous.py       # ✅ 可视化脚本
+├── generated/                       # 生成样本目录
+└── evaluation_results/              # 评估结果目录
 ```
 
 ---
@@ -305,7 +352,46 @@ python diffcsp/run.py \
 | 阶段一: 数据处理 | ✅ 完成 | 100% |
 | 阶段二: 网络改造 | ✅ 完成 | 100% |
 | 阶段三: 训练集成 | ✅ 完成 | 100% |
-| 阶段四: 生成评估 | ⏳ 待开始 | 0% |
+| 阶段四: 生成评估 | ✅ 完成 | 100% |
+
+---
+
+## 🚀 端到端流程示例
+
+### 1. 训练模型
+```bash
+cd CrystalFlow
+source ~/miniconda3/bin/activate crystalflow
+
+# 使用默认配置训练 NequIP
+python diffcsp/train_amorphous.py expname=nequip-v1
+
+# 或使用 EGNN (更快)
+python diffcsp/train_amorphous.py model=amorphous_flow_egnn expname=egnn-v1
+```
+
+### 2. 生成样本
+```bash
+python scripts/generate_amorphous.py \
+    --checkpoint hydra/singlerun/nequip-v1/epoch=XXX-val_loss=X.XX.ckpt \
+    --all_rates \
+    --num_samples 50
+```
+
+### 3. 评估质量
+```bash
+python scripts/evaluate_amorphous.py \
+    --generated generated/YYYYMMDD_HHMMSS/ \
+    --reference data/amorphous_carbon/data/ \
+    --output evaluation_results/
+```
+
+### 4. 可视化
+```bash
+python scripts/visualize_amorphous.py \
+    --input generated/YYYYMMDD_HHMMSS/rate_100 \
+    --output visualization.png
+```
 
 ---
 
