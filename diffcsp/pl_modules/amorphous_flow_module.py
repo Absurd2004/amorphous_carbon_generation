@@ -204,8 +204,31 @@ class AmorphousFlowModule(pl.LightningModule):
         target_velocity = batch.velocity_target
         loss = flow_matching_loss(pred_velocity, target_velocity, reduction='mean')
         
+        # Compute additional metrics for logging
+        with torch.no_grad():
+            # Velocity magnitude
+            pred_magnitude = torch.norm(pred_velocity, dim=-1).mean()
+            target_magnitude = torch.norm(target_velocity, dim=-1).mean()
+            
+            # Cosine similarity
+            cos_sim = F.cosine_similarity(pred_velocity, target_velocity, dim=-1).mean()
+            
+            # Per-component losses
+            loss_x = F.mse_loss(pred_velocity[:, 0], target_velocity[:, 0])
+            loss_y = F.mse_loss(pred_velocity[:, 1], target_velocity[:, 1])
+            loss_z = F.mse_loss(pred_velocity[:, 2], target_velocity[:, 2])
+        
         # Log metrics
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True, batch_size=batch.num_graphs)
+        self.log('train/loss_x', loss_x, on_step=False, on_epoch=True, batch_size=batch.num_graphs)
+        self.log('train/loss_y', loss_y, on_step=False, on_epoch=True, batch_size=batch.num_graphs)
+        self.log('train/loss_z', loss_z, on_step=False, on_epoch=True, batch_size=batch.num_graphs)
+        self.log('train/pred_magnitude', pred_magnitude, on_step=False, on_epoch=True, batch_size=batch.num_graphs)
+        self.log('train/target_magnitude', target_magnitude, on_step=False, on_epoch=True, batch_size=batch.num_graphs)
+        self.log('train/cosine_similarity', cos_sim, on_step=False, on_epoch=True, batch_size=batch.num_graphs)
+        
+        # Log time distribution
+        self.log('train/time_mean', t.mean(), on_step=False, on_epoch=True, batch_size=batch.num_graphs)
         
         return loss
     
@@ -221,7 +244,11 @@ class AmorphousFlowModule(pl.LightningModule):
         target_velocity = batch.velocity_target
         loss = flow_matching_loss(pred_velocity, target_velocity, reduction='mean')
         
+        # Additional metrics
+        cos_sim = F.cosine_similarity(pred_velocity, target_velocity, dim=-1).mean()
+        
         self.log('val_loss', loss, on_step=False, on_epoch=True, prog_bar=True, batch_size=batch.num_graphs)
+        self.log('val/cosine_similarity', cos_sim, on_step=False, on_epoch=True, batch_size=batch.num_graphs)
         
         return loss
     
@@ -244,8 +271,23 @@ class AmorphousFlowModule(pl.LightningModule):
             scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
                 optimizer,
                 T_max=self.lr_scheduler_params.get('T_max', 1000),
-                eta_min=self.lr_scheduler_params.get('eta_min', 1e-6),
+                eta_min=self.lr_scheduler_params.get('min_lr', 1e-6),
             )
+        elif self.lr_scheduler == 'cosine_warmup':
+            # Cosine schedule with warmup
+            warmup_epochs = self.lr_scheduler_params.get('warmup_epochs', 10)
+            min_lr = self.lr_scheduler_params.get('min_lr', 1e-6)
+            
+            def lr_lambda(epoch):
+                if epoch < warmup_epochs:
+                    # Linear warmup
+                    return float(epoch) / float(max(1, warmup_epochs))
+                else:
+                    # Cosine decay
+                    progress = float(epoch - warmup_epochs) / float(max(1, 1000 - warmup_epochs))
+                    return max(min_lr / self.learning_rate, 0.5 * (1.0 + math.cos(math.pi * progress)))
+            
+            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
         elif self.lr_scheduler == 'step':
             scheduler = torch.optim.lr_scheduler.StepLR(
                 optimizer,

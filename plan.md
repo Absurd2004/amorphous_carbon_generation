@@ -109,68 +109,65 @@ loss = MSE(v_pred, v_target)
 
 ---
 
-## 🔄 阶段三: 训练框架集成 (进行中)
+## ✅ 阶段三: 训练框架集成 (已完成)
 
 ### 3.1 配置文件
 
-**创建文件**: `conf/model/amorphous_flow.yaml`
+**已创建文件**:
+- `conf/amorphous_flow.yaml` - 主配置入口
+- `conf/data/amorphous_carbon.yaml` - 数据配置
+- `conf/model/amorphous_flow.yaml` - NequIP 模型配置
+- `conf/model/amorphous_flow_egnn.yaml` - EGNN 模型配置
+- `conf/model/amorphous_flow_schnet.yaml` - SchNet 模型配置
+- `conf/logging/amorphous_flow.yaml` - W&B 日志配置
+- `conf/train/amorphous_flow.yaml` - 训练配置
 
-```yaml
-_target_: diffcsp.pl_modules.amorphous_flow_module.AmorphousFlowModule
+### 3.2 训练脚本
 
-# Model selection
-model_type: nequip  # 'nequip', 'egnn', 'schnet'
+**已创建文件**: `diffcsp/train_amorphous.py`
 
-# Model configuration (model-specific)
-model_config:
-  # NequIP specific
-  irreps_hidden: '64x0e + 32x1e + 32x2e'
-  num_convs: 4
-  radial_neurons: [32, 64]
-  
-# Common configuration  
-cutoff: 5.0
-time_embed_dim: 32
-cond_embed_dim: 32
-cond_min_value: 1.0  # log10(10)
-cond_max_value: 4.5  # log10(30000)
+**功能**:
+- Hydra 配置管理
+- W&B 日志记录 (在线/离线模式)
+- 模型 checkpoint 保存
+- 早停机制
+- 学习率调度 (cosine warmup)
+- 梯度裁剪
 
-# Training configuration
-box_size: [12.0, 12.0, 20.0]
-is_2d: true
-prior: uniform
-use_condition: true
+### 3.3 使用方法
 
-# Optimizer
-learning_rate: 1e-4
-weight_decay: 0.0
+```bash
+# 使用 NequIP (默认)
+python diffcsp/train_amorphous.py
+
+# 使用 EGNN
+python diffcsp/train_amorphous.py model=amorphous_flow_egnn
+
+# 使用 SchNet  
+python diffcsp/train_amorphous.py model=amorphous_flow_schnet
+
+# 自定义实验名称
+python diffcsp/train_amorphous.py expname=my-experiment
+
+# 修改训练参数
+python diffcsp/train_amorphous.py model.learning_rate=1e-3 data.datamodule.batch_size.train=64
+
+# 离线模式 (不连接 W&B 服务器)
+python diffcsp/train_amorphous.py logging.wandb.mode=offline
+
+# Debug 模式 (快速验证)
+python diffcsp/train_amorphous.py train.pl_trainer.fast_dev_run=true
 ```
 
-### 3.2 数据配置
+### 3.4 W&B 日志
 
-**创建文件**: `conf/data/amorphous_carbon.yaml`
-
-```yaml
-_target_: diffcsp.pl_data.amorphous_dataset.AmorphousDataModule
-
-data_dir: ${paths.data_dir}/amorphous_carbon
-cutoff: 5.0
-duplicate: 128  # 数据增强
-train_ratio: 0.8
-val_ratio: 0.1
-batch_size: 32
-num_workers: 4
-auto_extract_rate: true
-```
-
-### 3.3 训练脚本
-
-**任务清单**:
-- [ ] 创建 Hydra 配置文件
-- [ ] 修改 `run.py` 支持 amorphous flow
-- [ ] 添加 checkpoint 回调
-- [ ] 添加 TensorBoard 日志
-- [ ] 添加早停机制
+记录的指标:
+- `train_loss` / `val_loss` - 主要损失
+- `train/loss_x`, `train/loss_y`, `train/loss_z` - 分量损失
+- `train/cosine_similarity`, `val/cosine_similarity` - 速度场相似度
+- `train/pred_magnitude`, `train/target_magnitude` - 速度幅值
+- 学习率曲线
+- 模型梯度/参数 (可选)
 
 ---
 
@@ -217,14 +214,22 @@ python scripts/generate_amorphous.py \
 ```
 CrystalFlow/
 ├── conf/
+│   ├── amorphous_flow.yaml          # ✅ 主配置入口
 │   ├── data/
-│   │   └── amorphous_carbon.yaml    # 数据配置
+│   │   └── amorphous_carbon.yaml    # ✅ 数据配置
+│   ├── logging/
+│   │   └── amorphous_flow.yaml      # ✅ W&B 日志配置
+│   ├── train/
+│   │   └── amorphous_flow.yaml      # ✅ 训练配置
 │   └── model/
-│       └── amorphous_flow.yaml      # 模型配置
+│       ├── amorphous_flow.yaml      # ✅ NequIP 配置
+│       ├── amorphous_flow_egnn.yaml # ✅ EGNN 配置
+│       └── amorphous_flow_schnet.yaml # ✅ SchNet 配置
 ├── data/
 │   └── amorphous_carbon/
 │       └── data/                    # LAMMPS 数据文件
 ├── diffcsp/
+│   ├── train_amorphous.py           # ✅ 训练脚本
 │   ├── pl_data/
 │   │   └── amorphous_dataset.py     # ✅ 数据加载
 │   └── pl_modules/
@@ -299,7 +304,7 @@ python diffcsp/run.py \
 |------|------|--------|
 | 阶段一: 数据处理 | ✅ 完成 | 100% |
 | 阶段二: 网络改造 | ✅ 完成 | 100% |
-| 阶段三: 训练集成 | 🔄 进行中 | 30% |
+| 阶段三: 训练集成 | ✅ 完成 | 100% |
 | 阶段四: 生成评估 | ⏳ 待开始 | 0% |
 
 ---

@@ -317,6 +317,19 @@ class AmorphousDataModule(pl.LightningDataModule):
     
     管理训练/验证/测试数据集的创建和 DataLoader。
     自动从文件名提取冷却速率。
+    
+    Args:
+        data_dir: 数据目录路径
+        cutoff: 图构建截断半径
+        duplicate: 数据增强复制次数
+        train_ratio: 训练集比例
+        val_ratio: 验证集比例
+        batch_size: 批大小 (int 或 dict{'train', 'val', 'test'})
+        num_workers: DataLoader 工作进程数 (int 或 dict{'train', 'val', 'test'})
+        pin_memory: 是否固定内存
+        seed: 随机种子
+        auto_extract_rate: 是否自动提取冷却速率
+        default_cooling_rate: 默认冷却速率
     """
     
     def __init__(
@@ -326,8 +339,8 @@ class AmorphousDataModule(pl.LightningDataModule):
         duplicate: int = 128,
         train_ratio: float = 0.8,
         val_ratio: float = 0.1,
-        batch_size: int = 32,
-        num_workers: int = 0,
+        batch_size: Union[int, Dict[str, int]] = 32,
+        num_workers: Union[int, Dict[str, int]] = 0,
         pin_memory: bool = True,
         seed: int = 42,
         auto_extract_rate: bool = True,
@@ -340,12 +353,30 @@ class AmorphousDataModule(pl.LightningDataModule):
         self.duplicate = duplicate
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
-        self.batch_size = batch_size
-        self.num_workers = num_workers
         self.pin_memory = pin_memory
         self.seed = seed
         self.auto_extract_rate = auto_extract_rate
         self.default_cooling_rate = default_cooling_rate
+        
+        # 处理 batch_size (可以是 int, dict, 或 DictConfig)
+        if hasattr(batch_size, 'get') or isinstance(batch_size, dict):
+            self.batch_size_train = int(batch_size.get('train', 32))
+            self.batch_size_val = int(batch_size.get('val', 32))
+            self.batch_size_test = int(batch_size.get('test', 32))
+        else:
+            self.batch_size_train = int(batch_size)
+            self.batch_size_val = int(batch_size)
+            self.batch_size_test = int(batch_size)
+        
+        # 处理 num_workers (可以是 int, dict, 或 DictConfig)
+        if hasattr(num_workers, 'get') or isinstance(num_workers, dict):
+            self.num_workers_train = int(num_workers.get('train', 0))
+            self.num_workers_val = int(num_workers.get('val', 0))
+            self.num_workers_test = int(num_workers.get('test', 0))
+        else:
+            self.num_workers_train = int(num_workers)
+            self.num_workers_val = int(num_workers)
+            self.num_workers_test = int(num_workers)
         
         self.train_dataset: Optional[AmorphousCarbonDataset] = None
         self.val_dataset: Optional[AmorphousCarbonDataset] = None
@@ -418,9 +449,9 @@ class AmorphousDataModule(pl.LightningDataModule):
     def train_dataloader(self) -> DataLoader:
         return DataLoader(
             self.train_dataset,
-            batch_size=self.batch_size,
+            batch_size=self.batch_size_train,
             shuffle=True,
-            num_workers=self.num_workers,
+            num_workers=self.num_workers_train,
             pin_memory=self.pin_memory,
             worker_init_fn=worker_init_fn,
         )
@@ -428,9 +459,9 @@ class AmorphousDataModule(pl.LightningDataModule):
     def val_dataloader(self) -> DataLoader:
         return DataLoader(
             self.val_dataset,
-            batch_size=self.batch_size,
+            batch_size=self.batch_size_val,
             shuffle=False,
-            num_workers=self.num_workers,
+            num_workers=self.num_workers_val,
             pin_memory=self.pin_memory,
             worker_init_fn=worker_init_fn,
         )
@@ -438,9 +469,9 @@ class AmorphousDataModule(pl.LightningDataModule):
     def test_dataloader(self) -> DataLoader:
         return DataLoader(
             self.test_dataset,
-            batch_size=self.batch_size,
+            batch_size=self.batch_size_test,
             shuffle=False,
-            num_workers=self.num_workers,
+            num_workers=self.num_workers_test,
             pin_memory=self.pin_memory,
             worker_init_fn=worker_init_fn,
         )

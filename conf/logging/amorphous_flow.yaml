@@ -1,0 +1,34 @@
+# Amorphous Flow Logging Configuration with W&B
+# 非晶碳 Flow Matching 日志配置
+
+# 验证频率
+val_check_interval: 1
+progress_bar_refresh_rate: 10
+
+# ============================================================================
+# Weights & Biases Configuration
+# ============================================================================
+wandb:
+  project: amorphous-flow
+  name: ${expname}
+  entity: null  # 设置你的 team/username
+  log_model: True
+  mode: 'online'  # 'online', 'offline', 'disabled'
+  group: amorphous-carbon
+  notes: "Flow Matching for 2D Amorphous Carbon Generation"
+  tags:
+    - flow-matching
+    - amorphous-carbon
+    - ${model.model_type}
+
+# W&B 模型监控
+wandb_watch:
+  log: 'gradients'  # 'all', 'gradients', 'parameters', null
+  log_freq: 100
+
+# ============================================================================
+# Learning Rate Monitor
+# ============================================================================
+lr_monitor:
+  logging_interval: "step"
+  log_momentum: False

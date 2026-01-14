@@ -1,0 +1,36 @@
+# Amorphous Flow Matching - Main Configuration
+# 非晶碳 Flow Matching 生成模型 - 主配置
+
+expname: amorphous-flow-nequip
+
+# 元数据
+core:
+  version: 0.0.1
+  tags:
+    - ${now:%Y-%m-%d}
+    - amorphous-carbon
+    - flow-matching
+
+# Hydra 配置
+hydra:
+  run:
+    dir: ${oc.env:HYDRA_JOBS}/singlerun/${expname}/
+
+  sweep:
+    dir: ${oc.env:HYDRA_JOBS}/multirun/${expname}/
+    subdir: ${hydra.job.num}_${hydra.job.id}
+
+  job:
+    chdir: false
+    env_set:
+      WANDB_START_METHOD: thread
+
+# 默认配置组合
+defaults:
+  - data: amorphous_carbon
+  - logging: amorphous_flow
+  - model: amorphous_flow
+  - optim: default
+  - train: amorphous_flow
+  - override hydra/job_logging: custom
+  - _self_
